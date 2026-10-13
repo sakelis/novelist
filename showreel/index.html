@@ -1,0 +1,387 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Showreel 2026</title>
+<style>
+  html,body{margin:0;height:100%;background:#000;overflow:hidden}
+  canvas{position:absolute;inset:0;margin:auto;width:min(100vw,calc(100vh*16/9));height:auto;aspect-ratio:16/9;display:block}
+</style>
+</head>
+<body>
+<canvas id="out"></canvas>
+<script>
+/* ------------------------------------------------------------------
+   SHOWREEL 2026 — 20 s, 120 BPM (1 beat = 0.5 s), fully deterministic.
+   frame(T) renders any instant; ?render skips the live loop (used by
+   render.mjs to export an MP4). Live: plays as a loop.
+   Pass 1: scene shader -> float FBO.  Pass 2: post (bloom, CA, grain).
+   Pass 3: 2D canvas typography + HUD.
+------------------------------------------------------------------- */
+const Q = new URLSearchParams(location.search);
+const W = +Q.get('w') || 1280, H = +Q.get('h') || 720, DUR = 20;
+const out = document.getElementById('out'); out.width = W; out.height = H;
+const g = out.getContext('2d');
+const glc = document.createElement('canvas'); glc.width = W; glc.height = H;
+const gl = glc.getContext('webgl2', {preserveDrawingBuffer:true, antialias:false});
+gl.getExtension('EXT_color_buffer_float');
+
+const VS = `#version 300 es
+void main(){ vec2 p=vec2((gl_VertexID<<1)&2, gl_VertexID&2); gl_Position=vec4(p*2.-1.,0.,1.); }`;
+
+const COMMON = `#version 300 es
+precision highp float;
+uniform vec2 R; uniform float T;
+out vec4 o;
+#define TAU 6.28318530718
+mat2 rot(float a){float c=cos(a),s=sin(a);return mat2(c,-s,s,c);}
+vec3 pal(float t){return .5+.5*cos(TAU*(t+vec3(0.,.33,.67)));}
+vec3 pal2(float t){return .5+.5*cos(TAU*(vec3(1.,1.,.5)*t+vec3(.8,.9,.3)));}
+float hash(vec2 p){p=fract(p*vec2(123.34,456.21));p+=dot(p,p+45.32);return fract(p.x*p.y);}
+float bp(float t){return exp(-6.*fract(t*2.));}
+`;
+
+const FS_SCENE = COMMON + `
+// ---------- 01 EMERGENCE : kaleidoscopic spiral blooming from a point
+vec3 sc1(vec2 p,float s){
+  float r=length(p), a=atan(p.y,p.x);
+  float seg=TAU/8.;
+  a=abs(mod(a+s*.18,seg)-seg*.5);
+  vec2 q=vec2(cos(a),sin(a))*r;
+  q+=.12*vec2(sin(q.y*7.+s*2.),cos(q.x*7.-s*2.));
+  float lr=log(r+.003);
+  float v=sin(lr*9.-s*3.+a*7.)+.5*sin(q.x*20.+s*2.)+sin(q.y*15.-s*3.);
+  float f=abs(fract(v*.9)-.5);
+  vec3 c=pal(v*.12+lr*.25+s*.08);
+  vec3 col=c*(smoothstep(.22,.0,f)*1.5+.12);
+  col+=pal(lr*.3+.5)*.015/(f+.02);
+  float rev=.02+2.4*pow(smoothstep(.0,3.6,s),1.4);
+  col*=smoothstep(rev,rev-.35,r);
+  col+=vec3(1.,.9,1.)*exp(-abs(r-rev)*30.)*.9*step(s,3.7);
+  col+=pal(s*.2)*.012/(r+.01)*smoothstep(0.,.4,s);
+  col*=1.+bp(s)*.5;
+  return col;
+}
+// ---------- 02 TUNNEL : hex wormhole
+vec3 sc2(vec2 p,float s){
+  p*=rot(s*.35+sin(s*.9)*.6);
+  float a=atan(p.y,p.x), r=length(p);
+  float n=6., seg=TAU/n;
+  float d=r*cos(mod(a,seg)-seg*.5);
+  float z=1./(d+.015);
+  float v=z+s*3.2;
+  float u=a/TAU*n*2.+z*.22*sin(s*.7)+s*.2;
+  float ring=abs(fract(v*.45)-.5);
+  float col_u=abs(fract(u)-.5);
+  float line=smoothstep(.05,.0,ring)+smoothstep(.035,.0,col_u)*.7;
+  float chk=step(.5,fract(v*.45))*step(.5,fract(u))+ (1.-step(.5,fract(v*.45)))*(1.-step(.5,fract(u)));
+  vec3 base=pal(z*.045+u*.04+s*.2);
+  vec3 col=base*(line*1.6+chk*.22);
+  float wave=exp(-abs(fract(v*.06-s*.5)-.5)*14.);
+  col+=pal(z*.03+.5)*wave*.35;
+  col+=pal(s*.3)*.03/(r+.025);
+  col*=smoothstep(0.,.05,r);
+  col*=1.+bp(s)*.7;
+  return col;
+}
+// ---------- 03 MOIRE : op-art interference
+vec3 sc3(vec2 p,float s){
+  p*=1.-.05*bp(s);
+  p*=rot(s*.12);
+  vec2 c1=vec2(cos(s*1.3),sin(s*1.7))*.42;
+  vec2 c2=vec2(cos(s*1.1+2.),sin(s*.9+1.))*.46;
+  vec2 c3=vec2(cos(s*.8+4.),sin(s*1.4+3.))*.36;
+  float f1=length(p-c1), f2=length(p-c2), f3=length(p-c3);
+  float k=64.+10.*sin(s*.8);
+  float m=sin(f1*k)+sin(f2*k)+.8*sin(f3*k);
+  float rad=sin(atan(p.y,p.x)*24.+length(p)*6.-s*3.);
+  float w=sin(m*2.2+s*3.);
+  float inv=step(.5,fract(floor(s*2.)*.5));
+  float mask=smoothstep(-.12,.12,w);
+  vec3 cA=pal(m*.07+s*.18+length(p)*.6);
+  vec3 cB=pal(m*.07+s*.18+length(p)*.6+.5)*.18+vec3(.01,0.,.04);
+  vec3 col=mix(cB,cA,mix(mask,1.-mask,inv*.0));
+  col+=pal(rad*.1+s*.3)*smoothstep(.97,1.,rad*.5+.5+w*.0)*.6;
+  col*=1.+bp(s)*.6;
+  col=mix(col,1.-col,inv*.0);
+  return col;
+}
+// ---------- 04 FOLD : kali-fractal mandala, infinite zoom
+vec3 sc4(vec2 p,float s){
+  p*=rot(s*.2);
+  vec2 z=p*(1.5-.5*smoothstep(0.,4.4,s))*(1.+.1*bp(s));
+  vec2 c=vec2(.55+.12*sin(s*.6),.32+.1*cos(s*.8));
+  float ang=.62+.25*sin(s*.45);
+  float d=1e3,d2=1e3,sc=1.,ac=0.;
+  for(int i=0;i<6;i++){
+    z=abs(z)-c;
+    z*=rot(ang);
+    z*=1.55; sc*=1.55;
+    d=min(d,abs(z.x)/sc);
+    d2=min(d2,abs(length(z)-.9)/sc);
+    ac+=exp(-length(z)*.8);
+  }
+  vec3 col=vec3(.012,0.,.035);
+  col+=pal(ac*.12+s*.1)*clamp(.0022/(d+.0016),0.,1.7);
+  col+=pal(ac*.12+s*.1+.5)*clamp(.003/(d2+.002),0.,1.7)*.8;
+  col+=pal2(ac*.07+s*.06)*.10*smoothstep(.2,2.5,ac*.5);
+  col*=(.3+exp(-length(p)*1.1))*(1.+bp(s)*.5);
+  return col;
+}
+// ---------- 05 SINGULARITY : galaxy collapse
+vec3 sc5(vec2 p,float s){
+  float k=smoothstep(1.0,2.6,s);
+  p*=1.+9.*k*k;
+  float r=length(p), a=atan(p.y,p.x);
+  a+=2.6/(r+.35)-s*.45+k*6.;
+  float arms=pow(.5+.5*sin(a*3.+log(r+.02)*-5.5),2.2)*exp(-r*1.1);
+  float arms2=pow(.5+.5*sin(a*5.-log(r+.02)*8.+s),3.)*exp(-r*1.6);
+  vec3 col=pal(log(r+.05)*.35+s*.07)*(arms*1.6+arms2*.8);
+  vec2 q=p*(30.)*rot(s*.05);
+  vec2 gq=floor(q); float h=hash(gq);
+  float st=step(.975,h)*exp(-length(fract(q)-.5)*7.)*(.5+.5*sin(s*3.+h*40.));
+  col+=vec3(.8,.9,1.)*st*exp(-r*.5)*1.4;
+  col+=vec3(1.,.85,.95)*.05/(r+.035);
+  float shock=exp(-abs(r-(s-2.45)*2.4)*14.)*step(2.45,s)*exp(-(s-2.45)*1.4);
+  col+=pal(r*.8+s)*shock*1.4;
+  float ring=exp(-abs(r-.34-.02*sin(s*4.))*55.)*smoothstep(2.6,3.2,s);
+  col+=pal(s*.2+r)*ring*(.8+bp(s));
+  col*=1.-smoothstep(.0,.9,k)*.0;
+  return col;
+}
+vec3 scene(int i,vec2 p,float s){
+  if(i==0)return sc1(p,s);
+  if(i==1)return sc2(p,s);
+  if(i==2)return sc3(p,s);
+  if(i==3)return sc4(p,s);
+  return sc5(p,s);
+}
+void main(){
+  vec2 p=(gl_FragCoord.xy-.5*R)/R.y;
+  float nb=floor(T/4.+.5), dt=T-nb*4.;
+  float hw=.45;
+  vec3 col;
+  if(nb>=1.&&nb<=4.&&abs(dt)<hw){
+    float m=smoothstep(-hw,hw,dt);
+    float k=exp(-dt*dt*38.);
+    vec2 q=p*(1.-.55*k)*rot(k*1.3*sign(dt+1e-4));
+    int i=int(nb);
+    vec3 a=scene(i-1,q,T-(nb-1.)*4.);
+    vec3 b=scene(i,q,T-nb*4.);
+    col=mix(a,b,m)+vec3(1.)*k*.55+pal(T)*k*.4;
+  } else {
+    int i=int(clamp(floor(T/4.),0.,4.));
+    col=scene(i,p,T-float(i)*4.);
+  }
+  o=vec4(col,1.);
+}`;
+
+const FS_POST = COMMON + `
+uniform sampler2D tx;
+vec3 samp(vec2 uv){return texture(tx,uv).rgb;}
+void main(){
+  vec2 uv=gl_FragCoord.xy/R;
+  vec2 d=uv-.5;
+  float b=bp(T);
+  float nb=floor(T/4.+.5), dt=T-nb*4.;
+  float tr=(nb>=1.&&nb<=4.)?exp(-dt*dt*38.):0.;
+  uv=.5+d*(1.-.018*b-.07*tr);
+  d=uv-.5;
+  float amt=.0035+.007*b+.03*tr;
+  vec3 c;
+  c.r=samp(uv+d*amt*1.6).r;
+  c.g=samp(uv).g;
+  c.b=samp(uv-d*amt*1.6).b;
+  // bloom: golden-angle ring taps
+  vec3 bl=vec3(0.);
+  for(int i=0;i<24;i++){
+    float fi=float(i);
+    float a=fi*2.39996, rr=sqrt((fi+.5)/24.);
+    vec2 o2=vec2(cos(a),sin(a))*rr*(.012+.02*b);
+    o2.x*=R.y/R.x;
+    bl+=max(samp(uv+o2*2.)-.55,0.);
+  }
+  bl/=24.;
+  c+=bl*1.7;
+  // tone + contrast
+  c=1.-exp(-c*1.25);
+  c=pow(c,vec3(.92));
+  float v=smoothstep(1.15,.25,length(d*vec2(1.,.75))*1.6);
+  c*=mix(.35,1.,v);
+  float gr=hash(gl_FragCoord.xy+fract(T)*91.7)-.5;
+  c+=gr*.045;
+  c*=.96+.04*sin(gl_FragCoord.y*1.7);
+  float fade=smoothstep(0.,.5,T)*smoothstep(20.,19.2,T);
+  o=vec4(c*fade,1.);
+}`;
+
+function prog(fs){
+  const mk=(t,s)=>{const x=gl.createShader(t);gl.shaderSource(x,s);gl.compileShader(x);
+    if(!gl.getShaderParameter(x,gl.COMPILE_STATUS))throw new Error(gl.getShaderInfoLog(x));return x;};
+  const p=gl.createProgram();gl.attachShader(p,mk(gl.VERTEX_SHADER,VS));gl.attachShader(p,mk(gl.FRAGMENT_SHADER,fs));
+  gl.linkProgram(p);if(!gl.getProgramParameter(p,gl.LINK_STATUS))throw new Error(gl.getProgramInfoLog(p));
+  return {p,R:gl.getUniformLocation(p,'R'),T:gl.getUniformLocation(p,'T'),tx:gl.getUniformLocation(p,'tx')};
+}
+const P1=prog(FS_SCENE), P2=prog(FS_POST);
+const tex=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,tex);
+gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA16F,W,H,0,gl.RGBA,gl.HALF_FLOAT,null);
+for(const [k,v] of [[gl.TEXTURE_MIN_FILTER,gl.LINEAR],[gl.TEXTURE_MAG_FILTER,gl.LINEAR],[gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE],[gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE]])gl.texParameteri(gl.TEXTURE_2D,k,v);
+const fbo=gl.createFramebuffer();gl.bindFramebuffer(gl.FRAMEBUFFER,fbo);
+gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,tex,0);
+gl.bindVertexArray(gl.createVertexArray());
+
+function drawGL(T){
+  gl.viewport(0,0,W,H);
+  gl.bindFramebuffer(gl.FRAMEBUFFER,fbo);
+  gl.useProgram(P1.p);gl.uniform2f(P1.R,W,H);gl.uniform1f(P1.T,T);
+  gl.drawArrays(gl.TRIANGLES,0,3);
+  gl.bindFramebuffer(gl.FRAMEBUFFER,null);
+  gl.useProgram(P2.p);gl.uniform2f(P2.R,W,H);gl.uniform1f(P2.T,T);
+  gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,tex);gl.uniform1i(P2.tx,0);
+  gl.drawArrays(gl.TRIANGLES,0,3);
+}
+
+/* ---------------- typography + HUD ---------------- */
+const FONT='"Inter Display","Inter","Helvetica Neue",Helvetica,Arial,sans-serif';
+const clamp=(x,a=0,b=1)=>Math.min(b,Math.max(a,x));
+const eo=x=>1-Math.pow(1-clamp(x),4);                 // ease out quart
+const eoExp=x=>x>=1?1:1-Math.pow(2,-10*clamp(x));
+const ease=x=>{x=clamp(x);return x<.5?4*x*x*x:1-Math.pow(-2*x+2,3)/2;};
+const bpulse=T=>Math.exp(-6*((T*2)%1));
+
+function word(T,str,t0,dur,o={}){
+  const age=T-t0; if(age<0||age>dur)return;
+  const S=H/720, size=(o.size||190)*S;
+  const inn=eoExp(age/.22), out_=clamp((age-(dur-.18))/.18);
+  const sc=(o.from||1.7)-((o.from||1.7)-1)*inn + (o.drift||.06)*age/dur;
+  const alpha=clamp(inn*3)*(1-out_);
+  const split=(1-clamp(age/.5))*26*S + 3*S + (o.glitch?Math.sin(age*90)*6*S*(1-clamp(age/.3)):0);
+  const track=(o.track||0)*S*(1-.5*inn+age*.0);
+  g.save();
+  g.translate(W/2+(o.dx||0)*S,H/2+(o.dy||0)*S);
+  g.rotate((o.rot||0)*(1-inn));
+  g.scale(sc,sc*(1+.08*(1-inn)));
+  g.font=`${o.weight||900} ${size}px ${FONT}`;
+  g.textAlign='center';g.textBaseline='middle';
+  g.letterSpacing=`${track}px`;
+  g.globalAlpha=alpha;
+  if(o.stroke){
+    g.lineWidth=3.5*S;g.lineJoin='round';
+    g.globalCompositeOperation='lighter';
+    for(const [c,dx] of [['#ff2a6d',-split],['#2aff9d',0],['#2a6dff',split]]){
+      g.strokeStyle=c;g.strokeText(str,dx,0);
+    }
+    g.globalCompositeOperation='source-over';
+    g.strokeStyle='#fff';g.lineWidth=2.5*S;g.strokeText(str,0,0);
+  } else {
+    g.shadowColor='rgba(0,0,0,.55)';g.shadowBlur=40*S;
+    g.globalCompositeOperation='lighter';
+    for(const [c,dx] of [['#ff0040',-split],['#00ff80',0],['#0060ff',split]]){
+      g.fillStyle=c;g.fillText(str,dx,0);
+    }
+    g.shadowBlur=0;
+    g.globalCompositeOperation='source-over';
+    g.fillStyle='#fff';g.fillText(str,0,0);
+  }
+  g.restore();
+}
+
+// finale title: letters stagger in, tracking collapses
+function finale(T){
+  const t0=18.25; const age=T-t0; if(age<0)return;
+  const S=H/720, str='SHOWREEL', size=150*S;
+  g.save();
+  g.font=`800 ${size}px ${FONT}`;g.textBaseline='middle';
+  const tr=lerp(60*S,6*S,eo(age/1.4));
+  g.letterSpacing='0px';
+  const widths=[...str].map(ch=>g.measureText(ch).width+tr);
+  const total=widths.reduce((a,b)=>a+b,0)-tr;
+  let x=W/2-total/2;
+  [...str].forEach((ch,i)=>{
+    const a=clamp((age-i*.07)/.5), e=eoExp(a);
+    g.save();
+    g.globalAlpha=e*clamp((20-T)/.8);
+    g.translate(x,H/2-4*S+(1-e)*40*S);
+    g.textAlign='left';
+    g.shadowColor='rgba(255,255,255,.55)';g.shadowBlur=30*S;
+    g.fillStyle='#fff';g.fillText(ch,0,0);
+    g.restore();
+    x+=widths[i];
+  });
+  // sub line
+  const a2=eo((age-.9)/.8);
+  g.globalAlpha=a2*clamp((20-T)/.8)*.9;
+  g.font=`500 ${19*S}px ${FONT}`;g.textAlign='center';
+  g.letterSpacing=`${14*S}px`;g.fillStyle='#fff';
+  g.fillText('MOTION  ·  LIGHT  ·  TIME',W/2+7*S,H/2+ 92*S);
+  // rule
+  g.globalAlpha=a2*.7*clamp((20-T)/.8);
+  g.fillRect(W/2-120*S*a2,H/2+62*S,240*S*a2,1.5*S);
+  g.restore();
+}
+const lerp=(a,b,t)=>a+(b-a)*t;
+
+const LABELS=['01 — EMERGENCE','02 — WORMHOLE','03 — MOIRÉ','04 — INFINITE FOLD','05 — SINGULARITY'];
+function hud(T){
+  const S=H/720, m=28*S;
+  g.save();
+  g.font=`500 ${12*S}px "DejaVu Sans Mono",monospace`;
+  g.letterSpacing=`${2.5*S}px`;g.textBaseline='alphabetic';
+  g.fillStyle='#fff';
+  const fadeIO=clamp(T/1.2)*clamp((19.4-T)/.6);
+  g.globalAlpha=.75*fadeIO;
+  g.textAlign='left';g.fillText('SHOWREEL ◦ 2026',m,m+8*S);
+  const idx=clamp(Math.floor(T/4),0,4);
+  const ph=T-idx*4, la=clamp(ph/.4)*clamp((4-ph)/.4);
+  g.globalAlpha=.8*la*fadeIO;
+  g.fillText(LABELS[idx],m,H-m);
+  g.globalAlpha=.75*fadeIO;
+  g.textAlign='right';
+  const f=Math.floor((T%1)*30),s=Math.floor(T)%60;
+  const pad=n=>String(n).padStart(2,'0');
+  g.fillText(`00:00:${pad(s)}:${pad(f)}`,W-m,H-m);
+  // beat dots
+  const bt=Math.floor(T*2)%4;
+  g.textAlign='right';
+  for(let i=0;i<4;i++){
+    g.globalAlpha=(i===bt?1:.25)*fadeIO;
+    g.beginPath();g.arc(W-m-i*16*S-3*S,m+4*S,3.2*S,0,7);g.fill();
+  }
+  // crop marks
+  g.globalAlpha=.4*fadeIO;g.fillRect(m,m*2.1,1*S,12*S);g.fillRect(W-m,m*2.1,1*S,12*S);
+  // progress hairline
+  g.globalAlpha=.6;g.fillRect(0,H-2*S,W*(T/DUR),2*S);
+  g.restore();
+}
+
+function overlay(T){
+  // scene 2 — kinetic words on the beat
+  word(T,'FLOW', 4.5,.9,{rot:-.08,from:2.2});
+  word(T,'FORM', 5.5,.9,{rot:.08,from:2.2,dy:-10});
+  word(T,'LIGHT',6.5,.9,{rot:-.05,from:2.2,glitch:1});
+  word(T,'TIME', 7.5,.85,{rot:.1,from:2.4});
+  // scene 3 — outlined type
+  word(T,'PULSE',8.6,1.4,{stroke:1,size:230,from:1.4,drift:.12,weight:800});
+  word(T,'ILLUSION',10.1,1.7,{stroke:1,size:150,from:1.3,drift:.1,weight:800});
+  // scene 4
+  word(T,'INFINITE',13.0,2.5,{size:170,from:1.5,drift:.14,track:10,weight:800});
+  finale(T);
+  hud(T);
+}
+
+function frame(T){
+  drawGL(T);
+  g.globalCompositeOperation='source-over';g.globalAlpha=1;g.shadowBlur=0;
+  g.drawImage(glc,0,0);
+  overlay(T);
+}
+window.frame=frame;window.DUR=DUR;
+
+if(!Q.has('render')){
+  const t0=performance.now();
+  (function loop(){frame(((performance.now()-t0)/1000)%DUR);requestAnimationFrame(loop);})();
+}
+</script>
+</body>
+</html>
